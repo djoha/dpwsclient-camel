@@ -11,7 +11,7 @@ import org.apache.camel.CamelContext;
 import org.apache.camel.builder.ExpressionBuilder;
 import org.apache.camel.builder.RouteBuilder;
 import org.apache.camel.converter.jaxb.JaxbDataFormat;
-import org.apache.camel.impl.DefaultCamelContext;
+import org.apache.camel.main.Main;
 
 /**
  *
@@ -19,8 +19,10 @@ import org.apache.camel.impl.DefaultCamelContext;
  */
 public class ClientLauncher {
 
+    private Main main;
     DpwsClient client;
     DiscoveryManager discovery;
+    TestBean testBean;
     String defaultEventSink;
     String eventTypeFilter = "";
     String networkInterface = "en0";
@@ -28,52 +30,26 @@ public class ClientLauncher {
     int port = 46835;
     String eventSinkPath = "eventSink";
     CamelContext context;
-    Map<String,String> namespaces;
+    Map<String, String> namespaces;
 
     public String getEventSink() {
-        
-        if(defaultEventSink == null){
+
+        if (defaultEventSink == null) {
             return String.format("http://%s:%d/%s", host, port, eventSinkPath);
         }
         return defaultEventSink;
     }
 
     public static void main(String[] args) throws Exception {
-
         ClientLauncher launcher = new ClientLauncher();
         launcher.init();
-
-        Thread t;
-
-        ProgRunner testProg = new ProgRunner();
-        t = new Thread(testProg);
-        t.start();
-
-        while (true) {
-            int cag = System.in.read();
-            System.out.println(cag);
-            if (cag == 113) {
-                break;
-            }
-        }
-
-        testProg.kill();
-
-        t.stop();
+        launcher.boot();
     }
 
-    public void destroy() throws Exception {
-        context.stop();
-        client.destroy();
-        discovery.destroy();
-    }
+    public void boot() throws Exception {
 
-    public void init() throws Exception {
-
-
-        context = new DefaultCamelContext();
-
-                
+        testBean = new TestBean();
+        
         client = new DpwsClient();
         client.setEventTypeFilter(eventTypeFilter);
         client.setDefaultEventSink(getEventSink());
@@ -86,53 +62,53 @@ public class ClientLauncher {
         discovery.setCamelContext(context);
 
 
-        // Camel Routes
-
-
-
-        context.addRoutes(new RouteBuilder() {
+        main = new Main();
+        main.enableHangupSupport();
+        main.bind("clientBean", client);
+        main.bind("discoveryBean", discovery);
+        main.addRouteBuilder(new RouteBuilder() {
             public void configure() {
-                
-                Map<String,String>  namespaces = new HashMap<String,String>();
-                namespaces.put("wsa","http://schemas.xmlsoap.org/ws/2004/08/addressing");
-                namespaces.put("s12","http://www.w3.org/2003/05/soap-envelope");
-                namespaces.put("wsd","http://schemas.xmlsoap.org/ws/2005/04/discovery");
-                namespaces.put("wsdp","http://schemas.xmlsoap.org/ws/2006/02/devprof");
-                namespaces.put("env","http://www.w3.org/2003/05/soap-envelope");
-        
-                JaxbDataFormat soapWSD = new JaxbDataFormat("org.w3._2003._05.soap_envelope:" + 
-                                                            "org.xmlsoap.schemas.discovery:" +
-                                                            "org.xmlsoap.schemas.eventing:" +
-                                                            "org.xmlsoap.schemas.addressing:" +
-                                                            "org.xmlsoap.schemas.mex:" +
-                                                            "org.xmlsoap.schemas.transfer:" +
-                                                            "org.xmlsoap.schemas.devprof:" +
-                                                            "org.xmlsoap.schemas.wsdl:" +
-                                                            "org.xmlsoap.schemas.wsdl.soap12");
+
+                Map<String, String> namespaces = new HashMap<String, String>();
+                namespaces.put("wsa", "http://schemas.xmlsoap.org/ws/2004/08/addressing");
+                namespaces.put("s12", "http://www.w3.org/2003/05/soap-envelope");
+                namespaces.put("wsd", "http://schemas.xmlsoap.org/ws/2005/04/discovery");
+                namespaces.put("wsdp", "http://schemas.xmlsoap.org/ws/2006/02/devprof");
+                namespaces.put("env", "http://www.w3.org/2003/05/soap-envelope");
+
+                JaxbDataFormat soapWSD = new JaxbDataFormat("org.w3._2003._05.soap_envelope:"
+                        + "org.xmlsoap.schemas.discovery:"
+                        + "org.xmlsoap.schemas.eventing:"
+                        + "org.xmlsoap.schemas.addressing:"
+                        + "org.xmlsoap.schemas.mex:"
+                        + "org.xmlsoap.schemas.transfer:"
+                        + "org.xmlsoap.schemas.devprof:"
+                        + "org.xmlsoap.schemas.wsdl:"
+                        + "org.xmlsoap.schemas.wsdl.soap12");
 
                 // Multicast Listening
                 from("multicast://239.255.255.250:3702?networkInterface=" + networkInterface)
                         .choice()
-                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_HELLO_ACTION + "']",namespaces)
+                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_HELLO_ACTION + "']", namespaces)
                         .unmarshal(soapWSD)
-                        .bean(client, "helloReceived")
-                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_BYE_ACTION + "']",namespaces)
+                        .bean("clientBean", "helloReceived")
+                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_BYE_ACTION + "']", namespaces)
                         .unmarshal(soapWSD)
-                        .bean(client, "byeReceived")
-                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_PROBE_ACTION + "']",namespaces)
+                        .bean("clientBean", "byeReceived")
+                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_PROBE_ACTION + "']", namespaces)
                         .to("log:fi.tut.fast.DpwsClient?level=INFO")
                         .otherwise()
-                        .bean(client, "messageReceived");
+                        .bean("clientBean", "messageReceived");
                 // Outgoing Probes
                 from("direct:discoveryProbe")
-                        .bean(discovery, "sendProbe");
+                        .bean("discoveryBean", "sendProbe");
 
                 // Incoming Probe Matches
                 from("direct:discoveryManager")
                         .choice()
-                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_PROBEMATCHES_ACTION + "']",namespaces)
+                        .when().xpath("/s12:Envelope/s12:Header/wsa:Action[text()='" + DPWSConstants.WSD_PROBEMATCHES_ACTION + "']", namespaces)
                         .unmarshal(soapWSD)
-                        .bean(client, "probeMatchesReceived");
+                        .bean("clientBean", "probeMatchesReceived");
 
                 // Event Endpoint
 
@@ -140,40 +116,54 @@ public class ClientLauncher {
                         .setHeader("newAddress", ExpressionBuilder.constantExpression("http://someNewAddress:123/thing"))
                         .setHeader("newAction", ExpressionBuilder.constantExpression("http://namespace.org/Service/Port/Action"))
                         .to("xslt:file:///Users/Johannes/Desktop/eventToInput.xslt")
-                        .bean(client, "eventReceived");
+                        .bean("clientBean", "eventReceived");
+
+
+//                // TESAT
+//                from(String.format("jetty:http://%s:%d/%s", host, 13579, "testInput"))
+////                        .setExchangePattern(ExchangePattern.InOut)
+//                        .bean(testBean, "stepOne")
+//                        .multicast()
+//                            .to("direct:fetchAdditionalData")
+//                            .bean(testBean,"stepThree")
+//                        .end()
+//                        .pollEnrich("direct:delayedStepTwo",2000, new AggregationStrategy(){
+//                                @Override
+//                                public Exchange aggregate(Exchange ex1, Exchange ex2) {
+//                                    String bOne = ex1.getIn().getBody(String.class);
+//                                    String bTwo = ex2.getIn().getBody(String.class);
+//
+//                                    ex1.getIn().setBody(String.format("[ex1: %s -- ex2: %s]",bOne,bTwo));
+//                                    return ex1;
+//                                }
+//                            });
+//                
+//                from("direct:fetchAdditionalData")
+//                        .delay(1000)
+//                        .bean(testBean, "stepTwo")
+//                        .to("direct:delayedStepTwo");
+//                
+//                <route>
+//                    <from uri="jetty:http://192.168.3.123:13579/whatever"/>
+//                   <process ref="whateverMarshalBean"/>
+//                   <multicast>
+//                        <to uri="activemq:someOuttopic"/>
+//                   </multicast>
+//                    <pollEnrich uri="activemq:inputTopic" timeout="5000" strategyRef="someBeanThatImplementsAggregationStrategy"/>
+//                <route>
+
 
             }
         });
 
-        context.start();
-        discovery.init();
-        client.init();
-
-
-
+        main.run();
     }
 
-    static class ProgRunner implements Runnable {
+    public void destroy() throws Exception {
+        client.destroy();
+        discovery.destroy();
+    }
 
-        static boolean kill = false;
-
-        @Override
-        public void run() {
-            try {
-                ClientLauncher launcher = new ClientLauncher();
-                launcher.init();
-                while (!kill) {
-                    Thread.sleep(50);
-                }
-                launcher.destroy();
-            } catch (Exception e) {
-                System.err.println("Oops:");
-                e.printStackTrace();
-            }
-        }
-
-        public void kill() {
-            kill = true;
-        }
+    public void init() throws Exception {
     }
 }

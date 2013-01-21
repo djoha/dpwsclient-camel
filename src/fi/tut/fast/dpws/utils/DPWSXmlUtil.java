@@ -307,7 +307,7 @@ public class DPWSXmlUtil {
 		// "somethingHappened"), stl);
 
 		return new TypeHandler(systemId, stl);
-	}
+	}   
 
 	public XmlObject buildElement(QName name, SchemaTypeLoader stl) {
 		SchemaGlobalElement el = stl.findElement(name);
