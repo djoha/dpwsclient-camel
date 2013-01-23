@@ -24,6 +24,7 @@ import fi.tut.fast.dpws.device.remote.DeviceRef;
 import fi.tut.fast.dpws.device.remote.OperationReference;
 import fi.tut.fast.dpws.device.remote.ServiceRef;
 import fi.tut.fast.dpws.device.remote.SubscriptionRef;
+import fi.tut.fast.dpws.discovery.DiscoveryManager;
 import fi.tut.fast.dpws.utils.DPWSMessageFactory;
 import fi.tut.fast.dpws.utils.DeviceRegistry;
 import fi.tut.fast.dpws.utils.SOAPUtil;
@@ -44,21 +45,18 @@ public class DpwsClient implements IDpwsClient {
     private String defaultEventSink;
     private String eventTypeFilter;
     private String eventSinkAddress;
-    private CamelContext camelContext;
     public static final String NULL_FILTER = "[[[NULL_FILTER]]]";
-
-    public void setCamelContext(CamelContext camelContext) {
-        this.camelContext = camelContext;
+    
+    private DiscoveryManager discovery;
+    
+    public void setDiscoveryManager(DiscoveryManager discovery){
+        this.discovery = discovery;
     }
+
+
     private Map<String, SubscriptionRef> subscriptions;
-    @Produce(uri = "direct:discoveryProbe")
-    ProducerTemplate dp;
+
     private DeviceRegistry registry;
-
-    interface Prober {
-
-        public void sendProbe(byte[] msg);
-    }
 
     public String getSomeProperty() {
         return someProperty;
@@ -106,7 +104,6 @@ public class DpwsClient implements IDpwsClient {
 
     public void destroy() throws Exception {
         logger.info("OSGi Bundle Stopping.");
-        dp.stop();
         for (SubscriptionRef ref : subscriptions.values()) {
             ref.unsubscribe();
             logger.info("Unsubscribed: " + ref);
@@ -115,8 +112,6 @@ public class DpwsClient implements IDpwsClient {
 
     public void init() throws Exception {
         logger.info("OSGi Bundle Initialized.");
-        dp = new DefaultProducerTemplate(camelContext);
-        dp.start();
         DPWSMessageFactory.init();
         subscriptions = new HashMap<String, SubscriptionRef>();
         registry = new DeviceRegistry();
@@ -204,12 +199,13 @@ public class DpwsClient implements IDpwsClient {
             SOAPMessage env = DPWSMessageFactory.getDiscoveryProbe();
             env.getSOAPBody().addBodyElement(DPWSConstants.WSD_PROBE_ELEMENT_QNAME);
             env.writeTo(probe);
+            
 
             System.out.println("Client Sending probe: ");
             env.writeTo(System.out);
             System.out.println("\n");
 
-            dp.sendBody("direct:discoveryProbe", probe.toByteArray());
+            discovery.sendProbe(probe.toByteArray());
         } catch (Exception e) {
             logger.log(Level.SEVERE, "Failed to send Probe.", e);
         }

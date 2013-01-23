@@ -26,138 +26,130 @@ import org.apache.camel.ProducerTemplate;
 import org.apache.camel.impl.DefaultProducerTemplate;
 import org.apache.commons.io.IOUtils;
 
-
 public class DiscoveryManager {
 
+    private static int SOCKET_TIMEOUT = 10000;
+    private String networkInterface;
+    private int sourcePort = 0;
+    private int muticastPort = 3702;
+    private NetworkInterface iface;
+    private String multicastGroup = "239.255.255.250";
+    private String host;
+    private int maxPacketSize = 2048;
+    private URI mcGroup;
+    private Thread dlThread;
+    private boolean done = false;
+    private Queue<Runnable> messageQueue;
+//    private CamelContext camelContext;
+    MulticastSocket s;
+    ProducerTemplate senderTemp;
 
-	private static int SOCKET_TIMEOUT = 10000;
+    public void setProducerTemplate(ProducerTemplate temp){
+        this.senderTemp = temp;
+    }
 
-	private String networkInterface;
-	private int sourcePort = 0;
-	private int muticastPort = 3702;
-	private NetworkInterface iface;
-	private String multicastGroup = "239.255.255.250";
-	private String host;
-	private int maxPacketSize = 2048;
+    interface Distributor {
 
-	private URI mcGroup;
+        public void send(byte[] packet);
 
-	private Thread dlThread;
+        public void sendPacket(DatagramPacket p);
 
-	private boolean done = false;
-	private Queue<Runnable> messageQueue;
-        private CamelContext camelContext;
+        public void send(Exchange ex);
+    }
 
-	MulticastSocket s;
+    public void init() throws IOException, Exception {
 
-	@Produce(uri = "direct:discoveryManager")
-	ProducerTemplate sender;
+        InetAddress addr = getSourceAddress();
 
-        public void setCamelContext(CamelContext context){
-            this.camelContext = context;
+        messageQueue = new MessageQueue();
+
+        System.out.println(String.format(
+                "Starting Discovery Socket on interface %s (%s) ",
+                getInterface().getDisplayName(), addr.getHostAddress()));
+
+        s = new MulticastSocket(new InetSocketAddress(addr.getHostAddress(),
+                sourcePort));
+        s.setReuseAddress(true);
+        s.setNetworkInterface(getInterface());
+        s.setLoopbackMode(true);
+    }
+
+    public void destroy() throws Exception {
+        done = true;
+        s.close();
+    }
+
+    public void sendProbe(byte[] buf) throws IOException {
+        DatagramPacket out = new DatagramPacket(buf, buf.length,
+                getMulticastGroup(), muticastPort);
+
+        try {
+            s.send(out);
+        } catch (SocketException ex) {
+            System.err.println("Socket Closed before DatagramPacket could be sent.");
+            ex.printStackTrace();
+        } catch (IOException ex) {
+            System.err.println("Socket Closed before DatagramPacket could be sent.");
+            ex.printStackTrace();
         }
-        
-        
-	interface Distributor {
-		public void send(byte[] packet);
 
-		public void sendPacket(DatagramPacket p);
+        // Start listening for responses
+        s.setSoTimeout(SOCKET_TIMEOUT);
+        done = false;
 
-		public void send(Exchange ex);
-	}
-
-	public void init() throws IOException, Exception {
-
-		InetAddress addr = getSourceAddress();
-
-                sender = new DefaultProducerTemplate(camelContext);
-                sender.start();
-		messageQueue = new MessageQueue();
-		
-		System.out.println(String.format(
-				"Starting Discovery Socket on interface %s (%s) ",
-				getInterface().getDisplayName(), addr.getHostAddress()));
-
-		s = new MulticastSocket(new InetSocketAddress(addr.getHostAddress(),
-				sourcePort));
-		s.setReuseAddress(true);
-		s.setNetworkInterface(getInterface());
-		s.setLoopbackMode(true);
-	}
-
-	public void destroy() throws Exception{
-		done = true;
-                sender.stop();
-		s.close();
-	}
-	
-	public void sendProbe(Exchange exchange) throws IOException {
-
-		done = true;
-		
-		// Send Probe
-		InputStream is = exchange.getIn().getBody(InputStream.class);
-
-		byte[] buf = IOUtils.toByteArray(is);
-		DatagramPacket out = new DatagramPacket(buf, buf.length,
-				getMulticastGroup(), muticastPort);
-
-		try {
-			s.send(out);
-		} catch (SocketException ex) {
-			System.err.println("Socket Closed before DatagramPacket could be sent.");
-                        ex.printStackTrace();
-		} catch (IOException ex) {
-			System.err.println("Socket Closed before DatagramPacket could be sent.");
-                        ex.printStackTrace();
-		}
-
-		// Start listening for responses
-		s.setSoTimeout(SOCKET_TIMEOUT);
-		done = false;
-		
-		dlThread = new Thread(new Runnable() {
-			@Override
-			public void run() {
-				while (!done) {
-					try {
-						consume();
-					} catch (SocketTimeoutException e) {
-						System.out.println("Discovery Timed Out.");
-						done = true;
-						break;
-					} catch (IOException e) {
-						e.printStackTrace();
-					}
-				}
-			}
-		});
-		dlThread.setDaemon(true);
-		dlThread.start();
-
-	}
-
-	private void consume() throws IOException, SocketTimeoutException {
-		byte buf[] = new byte[maxPacketSize];
-		DatagramPacket pack = new DatagramPacket(buf, buf.length);
-		s.receive(pack);
-		try {
-			messageQueue.add(new ExchangeDeliveryJob(pack.getData(), pack
-					.getLength()));
-		} catch (Exception e) {
-			System.err.println("Socket Closed before DatagramPacket could be sent.");
+        dlThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (!done) {
+                    try {
+                        consume();
+                    } catch (SocketTimeoutException e) {
+                        System.out.println("Discovery Timed Out.");
+                        done = true;
+                        break;
+                    } catch (IOException e) {
                         e.printStackTrace();
-		}
-	}
+                    }
+                }
+            }
+        });
+        dlThread.setDaemon(true);
+        dlThread.start();
+    }
 
-	class ExchangeDeliveryJob implements Runnable {
+    public void sendProbe(Exchange exchange) throws IOException {
 
-		byte buf[];
-		int length;
+        done = true;
 
-		public ExchangeDeliveryJob(byte[] buf, int len) {
-			this.buf = Arrays.copyOf(buf, len);
-			this.length = len;
+        // Send Probe
+        InputStream is = exchange.getIn().getBody(InputStream.class);
+
+        byte[] buf = IOUtils.toByteArray(is);
+        sendProbe(buf);
+
+    }
+
+    private void consume() throws IOException, SocketTimeoutException {
+        byte buf[] = new byte[maxPacketSize];
+        DatagramPacket pack = new DatagramPacket(buf, buf.length);
+        s.receive(pack);
+        try {
+            messageQueue.add(new ExchangeDeliveryJob(pack.getData(), pack
+                    .getLength()));
+        } catch (Exception e) {
+            System.err.println("Socket Closed before DatagramPacket could be sent.");
+            e.printStackTrace();
+        }
+    }
+
+    class ExchangeDeliveryJob implements Runnable {
+
+        byte buf[];
+        int length;
+
+        public ExchangeDeliveryJob(byte[] buf, int len) {
+            this.buf = Arrays.copyOf(buf, len);
+            this.length = len;
 //			
 //			System.out.println("Recieved packet...\n[[START OF PACKET]]");
 //			try {
@@ -167,160 +159,157 @@ public class DiscoveryManager {
 //				e.printStackTrace();
 //			}
 //			System.out.println("\n[[END OF PACKET]]");
-		}
+        }
 
-		@Override
-		public void run() {
-			sender.sendBody("direct:discoveryManager",buf);
-		}
+        @Override
+        public void run() {
+            senderTemp.sendBody("direct:discoveryManager", buf);
+        }
+    }
 
-	}
+    class MessageQueue extends ConcurrentLinkedQueue<Runnable> {
 
-	class MessageQueue extends ConcurrentLinkedQueue<Runnable> {
+        Thread processor;
+        private final Object lock = new Object();
 
-		Thread processor;
-		private final Object lock = new Object();
+        public MessageQueue() {
+            processor = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    while (true) {
+                        try {
+                            synchronized (lock) {
+                                lock.wait();
+                            }
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                        while (!isEmpty()) {
+                            poll().run();
+                        }
+                    }
+                }
+            });
+            processor.start();
+        }
 
-		public MessageQueue() {
-			processor = new Thread(new Runnable() {
-				@Override
-				public void run() {
-					while (true) {
-						try {
-							synchronized (lock) {
-								lock.wait();
-							}
-						} catch (InterruptedException e) {
-							e.printStackTrace();
-						}
-						while (!isEmpty()) {
-							poll().run();
-						}
-					}
-				}
-			});
-			processor.start();
-		}
+        @Override
+        public boolean offer(Runnable job) {
+            boolean result = super.offer(job);
+            synchronized (lock) {
+                lock.notifyAll();
+            }
+            return result;
+        }
+    }
 
-		@Override
-		public boolean offer(Runnable job) {
-			boolean result = super.offer(job);
-			synchronized (lock) {
-				lock.notifyAll();
-			}
-			return result;
-		}
+    public URI getMulticastAddress() throws URISyntaxException {
+        if (mcGroup == null) {
+            mcGroup = new URI(multicastGroup);
+        }
+        return mcGroup;
+    }
 
-	}
+    private InetAddress getSourceAddress() throws UnknownHostException,
+            SocketException {
+        if (host != null) {
+            return InetAddress.getByName(host);
+        }
 
-	public URI getMulticastAddress() throws URISyntaxException {
-		if (mcGroup == null) {
-			mcGroup = new URI(multicastGroup);
-		}
-		return mcGroup;
-	}
+        InetAddress addr = null;
+        Class addrClass;
+        if (getMulticastGroup() instanceof Inet4Address) {
+            addrClass = Inet4Address.class;
+        } else {
+            addrClass = Inet6Address.class;
+        }
 
-	private InetAddress getSourceAddress() throws UnknownHostException,
-			SocketException {
-		if (host != null) {
-			return InetAddress.getByName(host);
-		}
+        for (Enumeration<InetAddress> as = getInterface().getInetAddresses(); as
+                .hasMoreElements();) {
+            InetAddress a = as.nextElement();
+            if (addrClass.isInstance(a)) {
+                addr = a;
+            }
+        }
 
-		InetAddress addr = null;
-		Class addrClass;
-		if (getMulticastGroup() instanceof Inet4Address) {
-			addrClass = Inet4Address.class;
-		} else {
-			addrClass = Inet6Address.class;
-		}
+        if (addr == null) {
+            addr = getInterface().getInetAddresses().nextElement();
+        }
 
-		for (Enumeration<InetAddress> as = getInterface().getInetAddresses(); as
-				.hasMoreElements();) {
-			InetAddress a = as.nextElement();
-			if (addrClass.isInstance(a)) {
-				addr = a;
-			}
-		}
+        return addr;
 
-		if (addr == null) {
-			addr = getInterface().getInetAddresses().nextElement();
-		}
+    }
 
-		return addr;
+    public InetAddress getMulticastGroup() throws UnknownHostException {
+        return InetAddress.getByName(multicastGroup);
+    }
 
-	}
+    private NetworkInterface getInterface() throws SocketException,
+            UnknownHostException {
+        if (iface != null) {
+            return iface;
+        }
 
-	public InetAddress getMulticastGroup() throws UnknownHostException {
-		return InetAddress.getByName(multicastGroup);
-	}
+        if (getNetworkInterface() == null) {
+            iface = NetworkInterface.getByInetAddress(getMulticastGroup());
+            if (iface == null) {
+                iface = NetworkInterface.getNetworkInterfaces().nextElement();
+            }
+        } else {
+            iface = NetworkInterface.getByName(getNetworkInterface());
+        }
+        return iface;
+    }
 
-	private NetworkInterface getInterface() throws SocketException,
-			UnknownHostException {
-		if (iface != null) {
-			return iface;
-		}
+    public String getNetworkInterface() {
+        return networkInterface;
+    }
 
-		if (getNetworkInterface() == null) {
-			iface = NetworkInterface.getByInetAddress(getMulticastGroup());
-			if (iface == null) {
-				iface = NetworkInterface.getNetworkInterfaces().nextElement();
-			}
-		} else {
-			iface = NetworkInterface.getByName(getNetworkInterface());
-		}
-		return iface;
-	}
+    public void setNetworkInterface(String networkInterface) {
+        this.networkInterface = networkInterface;
+    }
 
-	public String getNetworkInterface() {
-		return networkInterface;
-	}
+    public int getSourcePort() {
+        return sourcePort;
+    }
 
-	public void setNetworkInterface(String networkInterface) {
-		this.networkInterface = networkInterface;
-	}
+    public void setSourcePort(int sourcePort) {
+        this.sourcePort = sourcePort;
+    }
 
-	public int getSourcePort() {
-		return sourcePort;
-	}
+    public int getMuticastPort() {
+        return muticastPort;
+    }
 
-	public void setSourcePort(int sourcePort) {
-		this.sourcePort = sourcePort;
-	}
+    public void setMuticastPort(int muticastPort) {
+        this.muticastPort = muticastPort;
+    }
 
-	public int getMuticastPort() {
-		return muticastPort;
-	}
+    public NetworkInterface getIface() {
+        return iface;
+    }
 
-	public void setMuticastPort(int muticastPort) {
-		this.muticastPort = muticastPort;
-	}
+    public void setIface(NetworkInterface iface) {
+        this.iface = iface;
+    }
 
-	public NetworkInterface getIface() {
-		return iface;
-	}
+    public String getHost() {
+        return host;
+    }
 
-	public void setIface(NetworkInterface iface) {
-		this.iface = iface;
-	}
+    public void setHost(String host) {
+        this.host = host;
+    }
 
-	public String getHost() {
-		return host;
-	}
+    public int getMaxPacketSize() {
+        return maxPacketSize;
+    }
 
-	public void setHost(String host) {
-		this.host = host;
-	}
+    public void setMaxPacketSize(int maxPacketSize) {
+        this.maxPacketSize = maxPacketSize;
+    }
 
-	public int getMaxPacketSize() {
-		return maxPacketSize;
-	}
-
-	public void setMaxPacketSize(int maxPacketSize) {
-		this.maxPacketSize = maxPacketSize;
-	}
-
-	public void setMulticastGroup(String multicastGroup) {
-		this.multicastGroup = multicastGroup;
-	}
-
+    public void setMulticastGroup(String multicastGroup) {
+        this.multicastGroup = multicastGroup;
+    }
 }
